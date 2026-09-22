@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>GigLenn — Before You Apply. Scan It First.</title>
+
+    <meta
+        name="description"
+        content="GigLenn helps you check online jobs and gigs for warning signs before you apply, pay money, or share sensitive information."
+    >
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <!-- NAVIGATION -->
+    <header class="navbar">
+        <div class="container nav-inner">
+
+            <a href="index.html" class="logo">
+                GigLenn
+            </a>
+
+            <nav class="nav-links">
+                <a href="#checker">Scan</a>
+                <a href="#how-it-works">How It Works</a>
+                <a href="#warning-signs">Warning Signs</a>
+                <a href="#report">Report</a>
+            </nav>
+
+        </div>
+    </header>
+
+
+    <!-- HERO -->
+    <section class="hero">
+
+        <div class="container hero-content">
+
+            <div class="hero-text">
+
+                <div class="badge">
+                    Online Job & Gig Risk Checker
+                </div>
+
+                <h1>
+                    Before You Apply.<br>
+                    <span>Scan It First.</span>
+                </h1>
+
+                <p>
+                    GigLenn checks online jobs, gigs, and earning opportunities
+                    for common warning signs before you apply, pay money,
+                    or share sensitive information.
+                </p>
+
+                <a href="#checker" class="btn primary-btn">
+                    Scan an Opportunity
+                </a>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- CHECKER -->
+    <section id="checker" class="checker-section">
+
+        <div class="container">
+
+            <div class="section-heading">
+                <span class="section-tag">CHECK NOW</span>
+
+                <h2>
+                    Is this opportunity worth the risk?
+                </h2>
+
+                <p>
+                    Paste the job link or describe the opportunity below.
+                    GigLenn will look for common warning patterns.
+                </p>
+            </div>
+
+
+            <form id="checker-form" class="checker-form">
+
+                <div class="form-group">
+
+                    <label for="job-link">
+                        Job or Gig Link
+                    </label>
+
+                    <input
+                        type="url"
+                        id="job-link"
+                        name="job-link"
+                        placeholder="https://example.com/job"
+                    >
+
+                </div>
+
+
+                <div class="form-divider">
+                    <span>OR</span>
+                </div>
+
+
+                <div class="form-group">
+
+                    <label for="opportunity-details">
+                        Opportunity Details
+                    </label>
+
+                    <textarea
+                        id="opportunity-details"
+                        name="opportunity-details"
+                        rows="8"
+                        placeholder="Paste the job description, WhatsApp message, Telegram message, email, or other details here..."
+                    ></textarea>
+
+                </div>
+
+
+                <button type="submit" class="btn primary-btn scan-btn">
+                    Scan Opportunity
+                </button>
+
+            </form>
+
+
+            <!-- RESULTS -->
+            <div
+                id="result-box"
+                class="result-box"
+                style="display: none;"
+            >
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- HOW IT WORKS -->
+    <section id="how-it-works" class="info-section">
+
+        <div class="container">
+
+            <div class="section-heading">
+
+                <span class="section-tag">
+                    HOW IT WORKS
+                </span>
+
+                <h2>
+                    Three simple steps
+                </h2>
+
+            </div>
+
+
+            <div class="steps-grid">
+
+                <div class="step-card">
+
+                    <div class="step-number">
+                        1
+                    </div>
+
+                    <h3>
+                        Paste
+                    </h3>
+
+                    <p>
+                        Paste a job link or the details of the opportunity.
+                    </p>
+
+                </div>
+
+
+                <div class="step-card">
+
+                    <div class="step-number">
+                        2
+                    </div>
+
+                    <h3>
+                        Scan
+                    </h3>
+
+                    <p>
+                        GigLenn checks the information for common warning signs.
+                    </p>
+
+                </div>
+
+
+                <div class="step-card">
+
+                    <div class="step-number">
+                        3
+                    </div>
+
+                    <h3>
+                        Decide Carefully
+                    </h3>
+
+                    <p>
+                        Review the findings before applying, paying,
+                        or sharing sensitive information.
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- WARNING SIGNS -->
+    <section id="warning-signs" class="warning-section">
+
+        <div class="container">
+
+            <div class="section-heading">
+
+                <span class="section-tag">
+                    WARNING SIGNS
+                </span>
+
+                <h2>
+                    Things worth checking carefully
+                </h2>
+
+            </div>
+
+
+            <div class="warning-grid">
+
+                <div class="warning-card">
+
+                    <h3>
+                        Upfront Payments
+                    </h3>
+
+                    <p>
+                        Requests for registration fees, training fees,
+                        deposits, or other payments before work begins.
+                    </p>
+
+                </div>
+
+
+                <div class="warning-card">
+
+                    <h3>
+                        Sensitive Information
+                    </h3>
+
+                    <p>
+                        Requests for passwords, PINs, OTPs, or other
+                        sensitive information.
+                    </p>
+
+                </div>
+
+
+                <div class="warning-card">
+
+                    <h3>
+                        Pressure to Act
+                    </h3>
+
+                    <p>
+                        Urgent deadlines, limited slots, or pressure
+                        to pay or apply immediately.
+                    </p>
+
+                </div>
+
+
+                <div class="warning-card">
+
+                    <h3>
+                        Unrealistic Earnings
+                    </h3>
+
+                    <p>
+                        Claims of unusually high or guaranteed income
+                        for little or no experience.
+                    </p>
+
+                </div>
+
+
+                <div class="warning-card">
+
+                    <h3>
+                        Messaging Apps
+                    </h3>
+
+                    <p>
+                        Recruitment that relies heavily on WhatsApp,
+                        Telegram, or other difficult-to-verify channels.
+                    </p>
+
+                </div>
+
+
+                <div class="warning-card">
+
+                    <h3>
+                        Recruitment Schemes
+                    </h3>
+
+                    <p>
+                        Opportunities where earning depends mainly
+                        on recruiting other people.
+                    </p>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- REPORT -->
+    <section id="report" class="report-section">
+
+        <div class="container">
+
+            <div class="section-heading">
+
+                <span class="section-tag">
+                    REPORT A SCAM
+                </span>
+
+                <h2>
+                    Seen something suspicious?
+                </h2>
+
+                <p>
+                    Share the details so they can be reviewed.
+                </p>
+
+            </div>
+
+
+            <form id="report-form" class="report-form">
+
+                <div class="form-row">
+
+                    <div class="form-group">
+
+                        <label for="report-company">
+                            Company / Recruiter
+                        </label>
+
+                        <input
+                            type="text"
+                            id="report-company"
+                            placeholder="Company or recruiter name"
+                        >
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label for="report-link">
+                            Job Link
+                        </label>
+
+                        <input
+                            type="url"
+                            id="report-link"
+                            placeholder="https://example.com"
+                        >
+
+                    </div>
+
+                </div>
+
+
+                <div class="form-row">
+
+                    <div class="form-group">
+
+                        <label for="report-source">
+                            Where did you find it?
+                        </label>
+
+                        <input
+                            type="text"
+                            id="report-source"
+                            placeholder="Facebook, WhatsApp, Telegram, website..."
+                        >
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label for="report-payment">
+                            Was payment requested?
+                        </label>
+
+                        <select id="report-payment">
+
+                            <option value="">
+                                Select
+                            </option>
+
+                            <option value="Yes">
+                                Yes
+                            </option>
+
+                            <option value="No">
+                                No
+                            </option>
+
+                        </select>
+
+                    </div>
+
+                </div>
+
+
+                <div class="form-row">
+
+                    <div class="form-group">
+
+                        <label for="report-amount">
+                            Amount Requested
+                        </label>
+
+                        <input
+                            type="text"
+                            id="report-amount"
+                            placeholder="e.g. KSh 2,500"
+                        >
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label for="report-email">
+                            Your Email
+                        </label>
+
+                        <input
+                            type="email"
+                            id="report-email"
+                            placeholder="Optional"
+                        >
+
+                    </div>
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label for="report-details">
+                        What happened?
+                    </label>
+
+                    <textarea
+                        id="report-details"
+                        rows="7"
+                        placeholder="Tell us what made the opportunity suspicious..."
+                    ></textarea>
+
+                </div>
+
+
+                <button type="submit" class="btn primary-btn">
+                    Submit Report
+                </button>
+
+
+                <div
+                    id="report-success"
+                    class="report-success"
+                    style="display: none;"
+                ></div>
+
+            </form>
+
+        </div>
+
+    </section>
+
+
+    <!-- FOOTER -->
+    <footer class="footer">
+
+        <div class="container footer-inner">
+
+            <div>
+
+                <div class="footer-logo">
+                    GigLenn
+                </div>
+
+                <p>
+                    Before You Apply. Scan It First.
+                </p>
+
+            </div>
+
+
+            <div class="footer-disclaimer">
+
+                <strong>Important:</strong>
+
+                <p>
+                    GigLenn provides warning-sign analysis and does not
+                    guarantee that an opportunity is legitimate or a scam.
+                    Always independently verify employers before sending
+                    money or sensitive information.
+                </p>
+
+            </div>
+
+        </div>
+
+        <div class="footer-bottom">
+
+            © 2026 GigLenn. All rights reserved.
+
+        </div>
+
+    </footer>
+
+
+    <script src="script.js"></script>
+
+</body>
+</html>
