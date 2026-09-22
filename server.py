@@ -1,37 +1,49 @@
-import json
+```python
+import os
 import re
+import json
 import sqlite3
-import urllib.request
 import urllib.parse
+import urllib.request
+import urllib.error
+import ipaddress
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from datetime import datetime, timezone
 
-HOST = "localhost"
-PORT = 3000
-DB_FILE = "GigLenn.db"
+# ============================================================
+# GigLenn Backend
+# ============================================================
+
+HOST = "0.0.0.0"
+PORT = int(os.environ.get("PORT", "3000"))
+
+DB_FILE = "gigscan.db"
 VERSION = "7.0"
 
 
-# -----------------------------
+# ============================================================
 # DATABASE
-# -----------------------------
+# ============================================================
+
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+    conn = get_db()
 
-    cursor.execute("""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company TEXT,
-            link TEXT,
-            source TEXT,
+            title TEXT,
+            url TEXT,
+            description TEXT,
             payment TEXT,
-            amount TEXT,
-            details TEXT,
-            email TEXT,
+            reason TEXT,
             status TEXT DEFAULT 'pending',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT
         )
     """)
 
@@ -39,38 +51,59 @@ def init_db():
     conn.close()
 
 
-# -----------------------------
-# TEXT HELPERS
-# -----------------------------
+# ============================================================
+# HELPERS
+# ============================================================
 
-def clean_text(text):
-    if not text:
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def clean_text(value):
+    if value is None:
         return ""
-    return re.sub(r"\s+", " ", str(text)).strip()
+
+    value = str(value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
-def contains_any(text, patterns):
-    text = text.lower()
-    return any(pattern.lower() in text for pattern in patterns)
+def send_json(handler, status_code, data):
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+    handler.send_response(status_code)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header(
+        "Access-Control-Allow-Methods",
+        "GET, POST, PATCH, DELETE, OPTIONS"
+    )
+    handler.send_header(
+        "Access-Control-Allow-Headers",
+        "Content-Type"
+    )
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
-def add_signal(signals, signal_type, title, detail):
-    for signal in signals:
-        if signal["title"].lower() == title.lower():
-            return False
+def read_json(handler):
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+        raw = handler.rfile.read(length)
 
-    signals.append({
-        "type": signal_type,
-        "title": title,
-        "detail": detail
-    })
+        if not raw:
+            return {}
 
-    return True
+        return json.loads(raw.decode("utf-8"))
+
+    except Exception:
+        return {}
 
 
-# -----------------------------
-# SMART TEXT ANALYSIS
-# -----------------------------
+# ============================================================
+# TEXT ANALYSIS
+# ============================================================
 
 def analyze_text(text):
     text = clean_text(text)
@@ -80,634 +113,605 @@ def analyze_text(text):
     signals = []
     categories = []
 
-    def add_category(category):
+    def add_signal(signal_type, title, detail, weight, category):
+        nonlocal score
+
+        signals.append({
+            "type": signal_type,
+            "title": title,
+            "detail": detail
+        })
+
+        score += weight
+
         if category not in categories:
             categories.append(category)
 
-    def add_warning(points, signal_type, title, detail, category):
-        nonlocal score
+    # --------------------------------------------------------
+    # Upfront/job fees
+    # --------------------------------------------------------
 
-        added = add_signal(
-            signals,
-            signal_type,
-            title,
-            detail
-        )
+    upfront_patterns = [
+        r"\bpay\b.*\b(to )?(apply|start|activate|unlock|register|join)",
+        r"\bpay\b.*\bfee\b",
+        r"\bregistration fee\b",
+        r"\bactivation fee\b",
+        r"\bprocessing fee\b",
+        r"\btraining fee\b",
+        r"\bdeposit\b.*\bjob\b",
+        r"\bdeposit\b.*\bwork\b",
+        r"\bupfront\b.*\bpayment\b",
+        r"\bpay first\b",
+        r"\bpayment before\b.*\bjob\b",
+        r"\bpay before\b.*\bwork\b"
+    ]
 
-        if added:
-            score += points
-            add_category(category)
-
-    # 1. Upfront payment
-    if contains_any(lower, [
-        "registration fee",
-        "registration fees",
-        "pay a registration",
-        "pay registration",
-        "joining fee",
-        "joining fees",
-        "activation fee",
-        "activation fees",
-        "deposit to start",
-        "pay to start",
-        "pay before you start",
-        "fee before starting",
-        "upfront fee",
-        "upfront payment",
-        "pay upfront"
-    ]):
-        add_warning(
-            32,
-            "financial",
+    if any(re.search(pattern, lower) for pattern in upfront_patterns):
+        add_signal(
+            "upfront_fee",
             "Upfront payment requested",
-            "The opportunity appears to require money before work begins.",
-            "financial"
+            "The opportunity appears to require money before you can start or access the work.",
+            32,
+            "Payment"
         )
 
-    # 2. Job/application fee
-    if contains_any(lower, [
-        "job fee",
-        "application fee",
-        "pay to apply",
-        "pay for the job",
-        "employment fee",
-        "processing fee",
-        "training fee",
-        "training fees",
-        "interview fee",
-        "placement fee",
-        "recruitment fee"
-    ]):
-        add_warning(
+    job_fee_patterns = [
+        r"\bjob fee\b",
+        r"\bjob placement fee\b",
+        r"\brecruitment fee\b",
+        r"\bemployment fee\b",
+        r"\bpay.*to get.*job\b",
+        r"\bpay.*for.*job\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in job_fee_patterns):
+        add_signal(
+            "job_fee",
+            "Job-related fee detected",
+            "A fee appears to be connected to getting or securing employment.",
             28,
-            "financial",
-            "Job-related fee requested",
-            "A fee appears to be connected to applying, training, recruitment, or getting the job.",
-            "financial"
+            "Payment"
         )
 
-    # 3. OTP/PIN/password/security
-    if contains_any(lower, [
-        "otp",
-        "one time password",
-        "one-time password",
-        "verification code",
-        "security code",
-        "mpesa pin",
-        "m-pesa pin",
-        "pin number",
-        "password",
-        "login password",
-        "bank pin",
-        "card pin",
-        "cvv"
-    ]):
-        add_warning(
-            45,
+    # --------------------------------------------------------
+    # OTP / PIN / passwords
+    # --------------------------------------------------------
+
+    security_patterns = [
+        r"\botp\b",
+        r"\bone[- ]time password\b",
+        r"\bmpesa pin\b",
+        r"\bpin number\b",
+        r"\bpassword\b.*\bsend\b",
+        r"\bsend.*\bpassword\b",
+        r"\bshare.*\bpin\b",
+        r"\bshare.*\botp\b",
+        r"\bverification code\b",
+        r"\bsecurity code\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in security_patterns):
+        add_signal(
             "security",
             "Sensitive security information requested",
-            "The opportunity appears to request a password, PIN, OTP, verification code, or similar security credential.",
-            "security"
+            "The message appears to request an OTP, PIN, password, verification code, or similar security credential.",
+            45,
+            "Security"
         )
 
-    # 4. Personal information
-    if contains_any(lower, [
-        "send your id",
-        "send id",
-        "national id",
-        "copy of your id",
-        "passport copy",
-        "passport number",
-        "bank account",
-        "bank details",
-        "credit card",
-        "debit card",
-        "personal information",
-        "sensitive information",
-        "date of birth"
-    ]):
-        add_warning(
-            25,
-            "personal",
+    # --------------------------------------------------------
+    # Sensitive personal information
+    # --------------------------------------------------------
+
+    personal_patterns = [
+        r"\bnational id\b",
+        r"\bid number\b",
+        r"\bpassport number\b",
+        r"\bbank account\b",
+        r"\bbank details\b",
+        r"\bcard number\b",
+        r"\bcredit card\b",
+        r"\bdebit card\b",
+        r"\bdate of birth\b",
+        r"\bsocial security\b",
+        r"\bcopy of your id\b",
+        r"\bsend your id\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in personal_patterns):
+        add_signal(
+            "personal_info",
             "Sensitive personal information requested",
-            "The opportunity appears to request personal or financial information that should be handled carefully.",
-            "personal"
+            "The opportunity appears to request identity, banking, card, or other sensitive personal information.",
+            25,
+            "Personal Information"
         )
 
-    # 5. WhatsApp / Telegram recruitment
-    if contains_any(lower, [
-        "whatsapp",
-        "whatsapp recruiter",
-        "contact me on whatsapp",
-        "telegram",
-        "contact me on telegram",
-        "message us on whatsapp"
-    ]):
-        add_warning(
+    # --------------------------------------------------------
+    # WhatsApp / Telegram recruitment
+    # --------------------------------------------------------
+
+    messaging_patterns = [
+        r"\bwhatsapp\b",
+        r"\btelegram\b",
+        r"\bcontact me on whatsapp\b",
+        r"\bmessage me on telegram\b",
+        r"\bjoin.*whatsapp.*group\b",
+        r"\bjoin.*telegram.*group\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in messaging_patterns):
+        add_signal(
+            "messaging",
+            "Messaging-app recruitment detected",
+            "The opportunity directs applicants to WhatsApp or Telegram for recruitment or communication.",
             10,
-            "communication",
-            "Off-platform messaging used for recruitment",
-            "Recruitment appears to rely on WhatsApp or Telegram rather than an independently verifiable company process.",
-            "communication"
+            "Recruitment"
         )
 
-    # 6. Urgency / pressure
-    if contains_any(lower, [
-        "limited slots",
-        "limited slot",
-        "act now",
-        "apply now",
-        "hurry",
-        "urgent",
-        "immediately",
-        "today only",
-        "last chance",
-        "offer expires",
-        "don't miss",
-        "do not miss",
-        "only a few slots",
-        "start today"
-    ]):
-        add_warning(
-            12,
+    # --------------------------------------------------------
+    # Urgency / pressure
+    # --------------------------------------------------------
+
+    pressure_patterns = [
+        r"\burgent\b",
+        r"\bact now\b",
+        r"\blimited slots\b",
+        r"\blimited places\b",
+        r"\btoday only\b",
+        r"\bexpires today\b",
+        r"\bimmediately\b",
+        r"\bwithin.*hours\b",
+        r"\bdon't miss\b",
+        r"\blast chance\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in pressure_patterns):
+        add_signal(
             "pressure",
             "Urgency or pressure detected",
-            "The wording creates pressure to act quickly or before the opportunity can be independently checked.",
-            "pressure"
+            "The message uses urgency or scarcity to encourage a quick decision.",
+            12,
+            "Pressure"
         )
 
-    # 7. Guaranteed earnings
-    if contains_any(lower, [
-        "guaranteed income",
-        "guaranteed earnings",
-        "guaranteed salary",
-        "guaranteed money",
-        "guaranteed profit",
-        "earn guaranteed",
-        "100% guaranteed",
-        "fixed guaranteed income"
-    ]):
-        add_warning(
-            24,
-            "earnings",
+    # --------------------------------------------------------
+    # Guaranteed earnings
+    # --------------------------------------------------------
+
+    guaranteed_patterns = [
+        r"\bguaranteed income\b",
+        r"\bguaranteed earnings\b",
+        r"\bguaranteed profit\b",
+        r"\bguaranteed money\b",
+        r"\bguaranteed salary\b",
+        r"\bearn guaranteed\b",
+        r"\bguaranteed daily\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in guaranteed_patterns):
+        add_signal(
+            "guaranteed_earnings",
             "Guaranteed earnings claim",
-            "The opportunity appears to promise guaranteed income or earnings.",
-            "earnings"
+            "The opportunity appears to promise guaranteed income or profits.",
+            24,
+            "Earnings"
         )
 
-    # 8. Unrealistic earnings
-    if contains_any(lower, [
-        "earn 100,000",
-        "earn ksh 100,000",
-        "earn ksh100,000",
-        "make 100,000",
-        "earn 50,000",
-        "earn ksh 50,000",
-        "earn ksh50,000",
-        "make 50,000",
-        "earn 30,000",
-        "earn ksh 30,000",
-        "earn ksh30,000",
-        "make 30,000",
-        "thousands per day",
-        "thousands daily",
-        "easy money",
-        "huge income",
-        "massive income",
-        "high income with no experience"
-    ]):
-        add_warning(
+    # --------------------------------------------------------
+    # Unrealistic earnings
+    # --------------------------------------------------------
+
+    unrealistic_patterns = [
+        r"\bearn\b.*\b\d{2,3}[,.]?\d*\b.*\bper day\b",
+        r"\bmake\b.*\b\d{2,3}[,.]?\d*\b.*\bper day\b",
+        r"\bearn\b.*\b\d{2,3}[,.]?\d*\b.*\bdaily\b",
+        r"\bmake\b.*\b\d{2,3}[,.]?\d*\b.*\bdaily\b",
+        r"\bthousands\b.*\bper day\b",
+        r"\bmillions\b.*\bper month\b",
+        r"\bget rich\b",
+        r"\bquick money\b",
+        r"\beasy money\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in unrealistic_patterns):
+        add_signal(
+            "unrealistic",
+            "Unusually high earnings claim",
+            "The opportunity appears to advertise unusually high or easy earnings.",
             20,
-            "earnings",
-            "Potentially unrealistic earnings claim",
-            "The advertised earnings may be unusually high compared with the work described.",
-            "earnings"
+            "Earnings"
         )
 
-    # 9. Recruitment / referral schemes
-    if contains_any(lower, [
-        "recruit others",
-        "recruit people",
-        "refer people",
-        "referral bonus",
-        "referral income",
-        "earn by recruiting",
-        "build your team",
-        "team commission",
-        "downline",
-        "recruit members"
-    ]):
-        add_warning(
-            25,
+    # --------------------------------------------------------
+    # Recruitment / referral schemes
+    # --------------------------------------------------------
+
+    recruitment_patterns = [
+        r"\brecruit\b.*\bpeople\b",
+        r"\brefer\b.*\bpeople\b",
+        r"\binvite\b.*\bpeople\b",
+        r"\bbring\b.*\bpeople\b",
+        r"\bbuild your team\b",
+        r"\bteam members\b.*\bcommission\b",
+        r"\bcommission\b.*\brecruit\b",
+        r"\bearn.*referral\b",
+        r"\breferral bonus\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in recruitment_patterns):
+        add_signal(
             "recruitment",
-            "Recruitment-based earnings",
-            "The opportunity appears to emphasize recruiting or referring other people for income.",
-            "recruitment"
+            "Recruitment or referral-based earnings",
+            "The opportunity appears to depend on recruiting or referring other people for earnings.",
+            25,
+            "Recruitment"
         )
 
-    # 10. Task / product boosting
-    if contains_any(lower, [
-        "product boosting",
-        "boost products",
-        "task optimization",
-        "optimization tasks",
-        "complete tasks and recharge",
-        "recharge your account",
-        "top up your account",
-        "order boosting",
-        "merchant tasks",
-        "complete orders",
-        "commission tasks"
-    ]):
-        add_warning(
-            28,
+    # --------------------------------------------------------
+    # Task/product boosting
+    # --------------------------------------------------------
+
+    task_patterns = [
+        r"\btask\b.*\bdeposit\b",
+        r"\bcomplete tasks\b.*\bpay\b",
+        r"\bboost\b.*\bproducts\b",
+        r"\bproduct boosting\b",
+        r"\border\b.*\breceive commission\b",
+        r"\bcomplete.*orders\b.*\bcommission\b",
+        r"\boptimization tasks\b",
+        r"\bmerchant tasks\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in task_patterns):
+        add_signal(
             "task",
-            "Task or product-boosting pattern detected",
-            "The description resembles task, order, product-boosting, or recharge-based work patterns that can involve financial risk.",
-            "task"
+            "Task or product-boosting warning",
+            "The description resembles task, order, optimization, or product-boosting work that may involve payments or deposits.",
+            28,
+            "Task Scheme"
         )
 
-    # 11. Crypto
-    if contains_any(lower, [
-        "send bitcoin",
-        "send crypto",
-        "cryptocurrency payment",
-        "crypto payment",
-        "usdt",
-        "btc payment",
-        "ethereum payment",
-        "wallet address",
-        "crypto wallet"
-    ]):
-        add_warning(
+    # --------------------------------------------------------
+    # Crypto
+    # --------------------------------------------------------
+
+    crypto_patterns = [
+        r"\bbitcoin\b",
+        r"\bcrypto\b",
+        r"\bcryptocurrency\b",
+        r"\busdt\b",
+        r"\beth\b",
+        r"\bethereum\b",
+        r"\bcrypto wallet\b",
+        r"\bwallet address\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in crypto_patterns):
+        add_signal(
+            "crypto",
+            "Cryptocurrency payment detected",
+            "The opportunity mentions cryptocurrency or crypto-wallet payments.",
             18,
-            "financial",
-            "Cryptocurrency payment involved",
-            "The opportunity appears to involve cryptocurrency payments or transfers.",
-            "financial"
+            "Payment"
         )
 
-    # 12. Gift cards / airtime
-    if contains_any(lower, [
-        "gift card",
-        "gift cards",
-        "airtime voucher",
-        "airtime",
-        "buy airtime",
-        "send airtime",
-        "voucher code",
-        "itunes card",
-        "google play card"
-    ]):
-        add_warning(
+    # --------------------------------------------------------
+    # Gift cards / airtime
+    # --------------------------------------------------------
+
+    gift_patterns = [
+        r"\bgift card\b",
+        r"\bgift cards\b",
+        r"\bairtime\b",
+        r"\bairtime voucher\b",
+        r"\bgoogle play card\b",
+        r"\bapple gift card\b",
+        r"\bvoucher code\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in gift_patterns):
+        add_signal(
+            "gift",
+            "Gift card or airtime payment requested",
+            "The opportunity mentions gift cards, vouchers, or airtime as a form of payment.",
             32,
-            "financial",
-            "Gift card or airtime payment involved",
-            "The opportunity appears to request payment through gift cards, airtime, or vouchers.",
-            "financial"
+            "Payment"
         )
 
-    # 13. Easy employment
-    if contains_any(lower, [
-        "no experience needed",
-        "no experience required",
-        "anyone can do it",
-        "anyone can apply",
-        "easy job",
-        "easy work",
-        "work from home easily",
-        "instant employment",
-        "get hired immediately",
-        "hired today",
-        "start immediately"
-    ]):
-        add_warning(
+    # --------------------------------------------------------
+    # Easy / guaranteed employment
+    # --------------------------------------------------------
+
+    easy_job_patterns = [
+        r"\bno experience\b.*\bguaranteed\b",
+        r"\bguaranteed job\b",
+        r"\bguaranteed employment\b",
+        r"\beasy job\b",
+        r"\banyone can get hired\b",
+        r"\bhired immediately\b",
+        r"\binstant employment\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in easy_job_patterns):
+        add_signal(
+            "easy_employment",
+            "Easy or guaranteed employment claim",
+            "The opportunity appears to promise unusually easy or guaranteed employment.",
             16,
-            "employment",
-            "Easy or immediate employment claim",
-            "The opportunity appears to promise unusually easy or immediate employment.",
-            "employment"
+            "Employment"
         )
 
-    # 14. Fake official identity + payment
-    if (
-        contains_any(lower, [
-            "government",
-            "ministry",
-            "county government",
-            "police",
-            "bank",
-            "safaricom",
-            "official"
-        ])
-        and
-        contains_any(lower, [
-            "pay",
-            "fee",
-            "deposit",
-            "send money",
-            "payment"
-        ])
-    ):
-        add_warning(
-            22,
-            "identity",
+    # --------------------------------------------------------
+    # Fake official identity + payment
+    # --------------------------------------------------------
+
+    official_patterns = [
+        r"\bgovernment\b",
+        r"\bministry\b",
+        r"\bcounty government\b",
+        r"\bpolice\b",
+        r"\bcentral bank\b",
+        r"\bkenya revenue authority\b",
+        r"\bofficial\b"
+    ]
+
+    payment_patterns = [
+        r"\bpay\b",
+        r"\bpayment\b",
+        r"\bfee\b",
+        r"\bdeposit\b",
+        r"\bsend money\b"
+    ]
+
+    has_official = any(re.search(pattern, lower) for pattern in official_patterns)
+    has_payment = any(re.search(pattern, lower) for pattern in payment_patterns)
+
+    if has_official and has_payment:
+        add_signal(
+            "official_payment",
             "Official identity combined with payment request",
-            "The opportunity appears to use an official organisation or brand identity while also requesting money.",
-            "identity"
+            "The message references an official institution while also requesting money or payment.",
+            22,
+            "Identity"
         )
 
-    # 15. Money forwarding
-    if contains_any(lower, [
-        "receive money and send it",
-        "receive money then send",
-        "forward money",
-        "transfer money for us",
-        "receive payments for us",
-        "use your account to receive",
-        "money transfer job",
-        "cash transfer job"
-    ]):
-        add_warning(
+    # --------------------------------------------------------
+    # Money forwarding
+    # --------------------------------------------------------
+
+    forwarding_patterns = [
+        r"\breceive money\b.*\bsend\b",
+        r"\bsend money\b.*\bto another\b",
+        r"\bforward\b.*\bpayment\b",
+        r"\btransfer money\b.*\bcommission\b",
+        r"\buse your account\b.*\btransfer\b",
+        r"\breceive.*commission.*send\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in forwarding_patterns):
+        add_signal(
+            "money_forwarding",
+            "Money transfer or forwarding request",
+            "The opportunity appears to involve receiving, transferring, or forwarding money through your account.",
             35,
-            "financial",
-            "Money transfer activity requested",
-            "The opportunity appears to ask you to receive, transfer, or forward money on someone else's behalf.",
-            "financial"
+            "Financial Activity"
         )
 
-    # 16. Credentials
-    if contains_any(lower, [
-        "login details",
-        "login credentials",
-        "username and password",
-        "account password",
-        "email password",
-        "social media password",
-        "give us access to your account"
-    ]):
-        add_warning(
-            45,
-            "security",
+    # --------------------------------------------------------
+    # Credentials
+    # --------------------------------------------------------
+
+    credential_patterns = [
+        r"\blogin details\b",
+        r"\blogin credentials\b",
+        r"\baccount password\b",
+        r"\busername and password\b",
+        r"\bemail password\b",
+        r"\baccess your account\b.*\bpassword\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in credential_patterns):
+        add_signal(
+            "credentials",
             "Account credentials requested",
-            "The opportunity appears to request login credentials or access to an account.",
-            "security"
+            "The opportunity appears to request login credentials or account access information.",
+            45,
+            "Security"
         )
 
-    # 17. Personal payment account
-    if contains_any(lower, [
-        "send to my mpesa",
-        "send to my m-pesa",
-        "pay my mpesa",
-        "pay my m-pesa",
-        "send money to my number",
-        "send payment to my number",
-        "send to my personal account",
-        "pay me directly"
-    ]):
-        add_warning(
+    # --------------------------------------------------------
+    # Personal M-Pesa / payment request
+    # --------------------------------------------------------
+
+    personal_payment_patterns = [
+        r"\bsend.*to my mpesa\b",
+        r"\bsend.*to my m-pesa\b",
+        r"\bpay me via mpesa\b",
+        r"\bpay me via m-pesa\b",
+        r"\bsend money to my number\b",
+        r"\bpay this number\b"
+    ]
+
+    if any(re.search(pattern, lower) for pattern in personal_payment_patterns):
+        add_signal(
+            "personal_payment",
+            "Payment to a personal number requested",
+            "The opportunity appears to request payment directly to a personal mobile-money number.",
             30,
-            "financial",
-            "Personal payment account requested",
-            "The opportunity appears to request payment to a personal account or mobile-money number.",
-            "financial"
+            "Payment"
         )
 
-    # -----------------------------
-    # COMBINATION WARNINGS
-    # -----------------------------
+    # --------------------------------------------------------
+    # Combination warnings
+    # --------------------------------------------------------
 
-    financial = "financial" in categories
-    recruitment = "recruitment" in categories
-    earnings = "earnings" in categories
-    pressure = "pressure" in categories
-    security = "security" in categories
-    communication = "communication" in categories
+    signal_types = {signal["type"] for signal in signals}
 
-    if financial and recruitment:
-        add_warning(
-            12,
-            "combination",
-            "Payment and recruitment warnings combined",
-            "Payment requests combined with recruitment activity create an additional warning pattern.",
-            "combination"
+    combinations = [
+        (
+            {"upfront_fee", "messaging"},
+            "upfront_messaging",
+            "Multiple warning signs appear together",
+            "An upfront payment request is combined with messaging-app recruitment.",
+            12
+        ),
+        (
+            {"security", "personal_info"},
+            "security_personal",
+            "Multiple sensitive-information requests",
+            "The opportunity appears to request more than one type of sensitive personal or security information.",
+            12
+        ),
+        (
+            {"guaranteed_earnings", "recruitment"},
+            "earnings_recruitment",
+            "Earnings and recruitment claims combined",
+            "Guaranteed earnings appear alongside recruitment or referral-based activity.",
+            12
+        ),
+        (
+            {"task", "upfront_fee"},
+            "task_payment",
+            "Task work combined with upfront payment",
+            "Task-based work appears to require payment or a deposit.",
+            12
+        ),
+        (
+            {"crypto", "upfront_fee"},
+            "crypto_payment",
+            "Cryptocurrency and upfront payment combined",
+            "Cryptocurrency activity appears alongside an upfront payment request.",
+            8
+        ),
+        (
+            {"pressure", "upfront_fee"},
+            "pressure_payment",
+            "Pressure combined with payment request",
+            "The opportunity appears to use urgency while also requesting payment.",
+            8
         )
+    ]
 
-    if financial and earnings:
-        add_warning(
-            12,
-            "combination",
-            "Payment and earnings warnings combined",
-            "Money is requested while the opportunity also promotes earnings.",
-            "combination"
-        )
+    for required, signal_type, title, detail, weight in combinations:
+        if required.issubset(signal_types):
+            add_signal(
+                signal_type,
+                title,
+                detail,
+                weight,
+                "Combined Warning"
+            )
 
-    if financial and pressure:
-        add_warning(
-            12,
-            "combination",
-            "Payment and urgency warnings combined",
-            "A payment request combined with pressure to act quickly increases the concern.",
-            "combination"
-        )
+    # --------------------------------------------------------
+    # Score
+    # --------------------------------------------------------
 
-    if security and financial:
-        add_warning(
-            12,
-            "combination",
-            "Financial and security warnings combined",
-            "The opportunity involves both money-related and sensitive security concerns.",
-            "combination"
-        )
+    score = max(0, min(100, score))
 
-    if financial and communication:
-        add_warning(
-            8,
-            "combination",
-            "Payment and off-platform messaging combined",
-            "A payment request combined with off-platform recruitment creates an additional warning pattern.",
-            "combination"
-        )
-
-    if len(categories) >= 3:
-        add_warning(
-            8,
-            "combination",
-            "Multiple warning categories detected",
-            "Several different warning categories were detected in the same opportunity.",
-            "combination"
-        )
-
-    score = min(max(score, 0), 100)
+    risk = calculate_risk(
+        score,
+        signals=signals,
+        categories=categories
+    )
 
     return {
         "score": score,
         "signals": signals,
-        "categories": categories
+        "categories": categories,
+        "risk": risk
     }
 
 
-# -----------------------------
-# RISK INTELLIGENCE
-# -----------------------------
+# ============================================================
+# RISK CALCULATION
+# ============================================================
 
 def calculate_risk(score, signals=None, categories=None):
-    signals = signals or []
-    categories = categories or []
 
     if score >= 60:
         level = "HIGH RISK"
-        css_class = "high"
-
-        important = [
-            signal["title"]
-            for signal in signals
-            if signal.get("title")
-        ][:3]
-
-        if important:
-            explanation = (
-                "This score was driven by warning signs including "
-                + ", ".join(important)
-                + "."
-            )
-        else:
-            explanation = (
-                "Several significant warning patterns were detected."
-            )
-
-        message = (
-            "Do not send money or sensitive information until independently verified."
-        )
-
-        action = (
-            "Stop and independently verify the employer, website, "
-            "payment request, and contact details before proceeding."
-        )
-
+        risk_class = "high"
+        message = "This opportunity contains several warning signs that deserve serious caution."
+        explanation = "The scan found multiple indicators commonly associated with risky job or gig offers."
+        action = "Do not send money or sensitive information until you independently verify the opportunity."
     elif score >= 25:
         level = "CAUTION"
-        css_class = "medium"
-
-        count = len(signals)
-
-        if count == 1:
-            explanation = "One warning pattern was detected."
-        else:
-            explanation = (
-                f"{count} warning patterns were detected across "
-                f"{len(categories)} category or categories."
-            )
-
-        message = (
-            "Some warning signs were detected. Verify the opportunity "
-            "independently before proceeding."
-        )
-
-        action = (
-            "Pause before applying, paying, or sharing sensitive information. "
-            "Verify the opportunity using independent sources."
-        )
-
+        risk_class = "caution"
+        message = "This opportunity contains warning signs that should be checked carefully."
+        explanation = "The scan found one or more indicators that may require additional verification."
+        action = "Verify the employer, website, payment requests, and contact details before proceeding."
     else:
         level = "NO OBVIOUS WARNING SIGNS"
-        css_class = "low"
-
-        explanation = (
-            "No major warning pattern was detected in the information provided."
-        )
-
-        message = (
-            "No major warning pattern was detected. "
-            "This is not proof that the opportunity is legitimate."
-        )
-
-        action = (
-            "You may continue researching the opportunity, but independently "
-            "verify the employer before sharing money or sensitive information."
-        )
+        risk_class = "low"
+        message = "The scan did not find obvious warning signs in the information provided."
+        explanation = "No major indicators were detected by the current automated checks."
+        action = "Still verify the opportunity independently before sharing sensitive information or making payments."
 
     return {
         "level": level,
-        "class": css_class,
+        "class": risk_class,
         "message": message,
         "explanation": explanation,
         "action": action
     }
 
 
-# -----------------------------
-# TITLE PARSER
-# -----------------------------
-
-class TitleParser:
-
-    @staticmethod
-    def extract(html):
-        if not html:
-            return ""
-
-        match = re.search(
-            r"<title[^>]*>(.*?)</title>",
-            html,
-            re.IGNORECASE | re.DOTALL
-        )
-
-        if match:
-            title = re.sub(r"<.*?>", "", match.group(1))
-            return clean_text(title)
-
-        return ""
-
-
-# -----------------------------
+# ============================================================
 # WEBSITE INSPECTION
-# -----------------------------
+# ============================================================
 
 def inspect_website(url):
-    signals = []
-    title = ""
-    status = "unknown"
 
-    parsed = urlparse(url)
-
-    hostname = parsed.hostname or ""
-    lower_host = hostname.lower()
-
-    # Domain checks
-    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", hostname):
-        add_signal(
-            signals,
-            "website",
-            "Website uses an IP address",
-            "The link uses a raw IP address instead of a normal domain name."
-        )
-
-    if len(hostname) > 45:
-        add_signal(
-            signals,
-            "website",
-            "Unusually long website address",
-            "The website hostname is unusually long and should be independently checked."
-        )
-
-    if "xn--" in lower_host:
-        add_signal(
-            signals,
-            "website",
-            "Punycode domain detected",
-            "The domain uses Punycode, which can sometimes make look-alike domains harder to recognize."
-        )
-
-    if parsed.scheme.lower() != "https":
-        add_signal(
-            signals,
-            "website",
-            "Website is not using HTTPS",
-            "The supplied website does not use HTTPS."
-        )
+    result = {
+        "url": url,
+        "signals": [],
+        "website": {},
+        "analysis": None,
+        "error": None
+    }
 
     try:
+        parsed = urllib.parse.urlparse(url)
+
+        if parsed.scheme not in ("http", "https"):
+            url = "https://" + url
+            parsed = urllib.parse.urlparse(url)
+
+        hostname = parsed.hostname or ""
+
+        result["website"]["hostname"] = hostname
+        result["website"]["https"] = parsed.scheme == "https"
+
+        # IP address
+        try:
+            ipaddress.ip_address(hostname)
+
+            result["signals"].append({
+                "type": "ip_address",
+                "title": "Website uses an IP address",
+                "detail": "The link uses a numerical IP address instead of a normal domain name."
+            })
+
+        except ValueError:
+            pass
+
+        # Long hostname
+        if len(hostname) > 50:
+            result["signals"].append({
+                "type": "long_hostname",
+                "title": "Unusually long website address",
+                "detail": "The hostname is unusually long and should be checked carefully."
+            })
+
+        # Punycode
+        if "xn--" in hostname.lower():
+            result["signals"].append({
+                "type": "punycode",
+                "title": "Punycode domain detected",
+                "detail": "The domain contains Punycode characters and should be independently verified."
+            })
+
         request = urllib.request.Request(
             url,
             headers={
@@ -715,183 +719,127 @@ def inspect_website(url):
             }
         )
 
-        with urllib.request.urlopen(request, timeout=8) as response:
-            status = response.status
-            content_type = response.headers.get(
-                "Content-Type",
-                ""
-            )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+                final_url = response.geturl()
 
-            raw = response.read(300000)
+                raw = response.read(500000)
 
-            try:
-                html = raw.decode(
-                    "utf-8",
-                    errors="ignore"
-                )
-            except Exception:
-                html = ""
+                charset = response.headers.get_content_charset() or "utf-8"
 
-            title = TitleParser.extract(html)
+                try:
+                    page_text = raw.decode(charset, errors="ignore")
+                except Exception:
+                    page_text = raw.decode("utf-8", errors="ignore")
 
-            if status >= 400:
-                add_signal(
-                    signals,
-                    "website",
-                    "Website returned an error",
-                    f"The website returned HTTP status {status}."
+                result["website"]["status"] = status
+                result["website"]["final_url"] = final_url
+
+                title_match = re.search(
+                    r"<title[^>]*>(.*?)</title>",
+                    page_text,
+                    flags=re.IGNORECASE | re.DOTALL
                 )
 
-            if not title:
-                add_signal(
-                    signals,
-                    "website",
-                    "Website has no clear page title",
-                    "The page did not provide a clear HTML title."
+                title = ""
+
+                if title_match:
+                    title = clean_text(
+                        re.sub("<[^>]+>", " ", title_match.group(1))
+                    )
+
+                result["website"]["title"] = title
+
+                # Remove scripts/styles/HTML for text analysis
+                visible_text = re.sub(
+                    r"<script\b[^>]*>.*?</script>",
+                    " ",
+                    page_text,
+                    flags=re.IGNORECASE | re.DOTALL
                 )
 
-            page_text = clean_text(
-                re.sub(r"<script.*?</script>", " ", html, flags=re.I | re.S)
-            )
-
-            page_text = clean_text(
-                re.sub(r"<style.*?</style>", " ", page_text, flags=re.I | re.S)
-            )
-
-            website_analysis = analyze_text(page_text)
-
-            for signal in website_analysis["signals"]:
-                add_signal(
-                    signals,
-                    "website",
-                    signal["title"],
-                    signal["detail"]
+                visible_text = re.sub(
+                    r"<style\b[^>]*>.*?</style>",
+                    " ",
+                    visible_text,
+                    flags=re.IGNORECASE | re.DOTALL
                 )
 
-    except Exception as exc:
-        add_signal(
-            signals,
-            "website",
-            "Website could not be fully inspected",
-            "The website could not be reached or inspected automatically."
-        )
+                visible_text = re.sub(
+                    r"<[^>]+>",
+                    " ",
+                    visible_text
+                )
 
-        status = "unreachable"
+                visible_text = clean_text(visible_text)
 
-    return {
-        "url": url,
-        "title": title,
-        "status": status,
-        "signals": signals
-    }
+                result["website"]["text_preview"] = visible_text[:2000]
 
+                result["analysis"] = analyze_text(
+                    (title + " " + visible_text)[:20000]
+                )
 
-# -----------------------------
-# HTTP HELPERS
-# -----------------------------
+        except urllib.error.HTTPError as error:
+            result["website"]["status"] = error.code
+            result["error"] = f"Website returned HTTP {error.code}."
 
-def send_json(handler, status_code, data):
-    body = json.dumps(
-        data,
-        ensure_ascii=False
-    ).encode("utf-8")
+        except urllib.error.URLError as error:
+            result["error"] = f"Could not access website: {error.reason}"
 
-    handler.send_response(status_code)
+        except Exception as error:
+            result["error"] = f"Website inspection failed: {str(error)}"
 
-    handler.send_header(
-        "Content-Type",
-        "application/json; charset=utf-8"
-    )
+        # HTTP warning
+        if not result["website"].get("https", False):
+            result["signals"].append({
+                "type": "http",
+                "title": "Website is not using HTTPS",
+                "detail": "The submitted link does not use HTTPS."
+            })
 
-    handler.send_header(
-        "Access-Control-Allow-Origin",
-        "*"
-    )
+        return result
 
-    handler.send_header(
-        "Access-Control-Allow-Methods",
-        "GET, POST, PATCH, DELETE, OPTIONS"
-    )
-
-    handler.send_header(
-        "Access-Control-Allow-Headers",
-        "Content-Type"
-    )
-
-    handler.send_header(
-        "Content-Length",
-        str(len(body))
-    )
-
-    handler.end_headers()
-    handler.wfile.write(body)
+    except Exception as error:
+        result["error"] = str(error)
+        return result
 
 
-def read_json(handler):
-    try:
-        length = int(
-            handler.headers.get(
-                "Content-Length",
-                "0"
-            )
-        )
-
-        raw = handler.rfile.read(length)
-
-        if not raw:
-            return {}
-
-        return json.loads(
-            raw.decode("utf-8")
-        )
-
-    except Exception:
-        return {}
-
-
-# -----------------------------
-# REQUEST HANDLER
-# -----------------------------
+# ============================================================
+# HTTP HANDLER
+# ============================================================
 
 class GigLennHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
-        print(
-            "%s - %s"
-            % (
-                self.address_string(),
-                format % args
-            )
-        )
+        print("%s - %s" % (self.address_string(), format % args))
+
+    # --------------------------------------------------------
+    # OPTIONS
+    # --------------------------------------------------------
 
     def do_OPTIONS(self):
         self.send_response(204)
-
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "*"
-        )
-
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header(
             "Access-Control-Allow-Methods",
             "GET, POST, PATCH, DELETE, OPTIONS"
         )
-
         self.send_header(
             "Access-Control-Allow-Headers",
             "Content-Type"
         )
-
         self.end_headers()
 
-    # -------------------------
+    # --------------------------------------------------------
     # GET
-    # -------------------------
+    # --------------------------------------------------------
 
     def do_GET(self):
-        parsed = urlparse(self.path)
+
+        parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
-        query = parse_qs(parsed.query)
+        params = urllib.parse.parse_qs(parsed.query)
 
         # Root
         if path == "/":
@@ -901,143 +849,66 @@ class GigLennHandler(BaseHTTPRequestHandler):
                 {
                     "name": "GigLenn",
                     "version": VERSION,
-                    "status": "online",
-                    "riskIntelligence": True,
-                    "smartAnalysis": True,
-                    "websiteInspection": True
+                    "status": "online"
                 }
             )
             return
 
-        # Text analysis
+        # Analyze text
         if path == "/analyze":
-            text = query.get(
-                "text",
-                [""]
-            )[0]
 
-            analysis = analyze_text(text)
+            text = params.get("text", [""])[0]
 
-            risk = calculate_risk(
-                analysis["score"],
-                analysis["signals"],
-                analysis["categories"]
-            )
-
-            send_json(
-                self,
-                200,
-                {
-                    "analysis": analysis,
-                    "risk": risk
-                }
-            )
-            return
-
-        # Website check
-        if path == "/check":
-            url = query.get(
-                "url",
-                [""]
-            )[0].strip()
-
-            if not url:
+            if not text.strip():
                 send_json(
                     self,
                     400,
                     {
-                        "error": "URL is required"
+                        "error": "No text provided."
                     }
                 )
                 return
 
-            if not re.match(
-                r"^https?://",
-                url,
-                re.IGNORECASE
-            ):
-                url = "https://" + url
-
-            website = inspect_website(url)
-
-            website_text_parts = [
-                website.get("title", "")
-            ]
-
-            for signal in website["signals"]:
-                website_text_parts.append(
-                    signal.get("title", "")
-                )
-                website_text_parts.append(
-                    signal.get("detail", "")
-                )
-
-            combined_text = clean_text(
-                " ".join(website_text_parts)
-            )
-
-            analysis = analyze_text(
-                combined_text
-            )
-
-            for signal in website["signals"]:
-                add_signal(
-                    analysis["signals"],
-                    "website",
-                    signal["title"],
-                    signal["detail"]
-                )
-
-                if signal["title"]:
-                    if signal["title"] not in analysis["categories"]:
-                        analysis["categories"].append("website")
-
-            # Website signals add modest extra weight.
-            high_signal_titles = {
-                "Website uses an IP address",
-                "Punycode domain detected",
-                "Website returned an error"
-            }
-
-            caution_signal_titles = {
-                "Unusually long website address",
-                "Website is not using HTTPS",
-                "Website has no clear page title",
-                "Website could not be fully inspected"
-            }
-
-            for signal in website["signals"]:
-                if signal["title"] in high_signal_titles:
-                    analysis["score"] += 15
-                elif signal["title"] in caution_signal_titles:
-                    analysis["score"] += 6
-
-            analysis["score"] = min(
-                max(analysis["score"], 0),
-                100
-            )
-
-            risk = calculate_risk(
-                analysis["score"],
-                analysis["signals"],
-                analysis["categories"]
-            )
+            analysis = analyze_text(text)
 
             send_json(
                 self,
                 200,
                 {
-                    "website": website,
                     "analysis": analysis,
-                    "risk": risk
+                    "risk": analysis["risk"]
                 }
             )
             return
 
-        # Reports
+        # Check website
+        if path == "/check":
+
+            url = params.get("url", [""])[0]
+
+            if not url.strip():
+                send_json(
+                    self,
+                    400,
+                    {
+                        "error": "No URL provided."
+                    }
+                )
+                return
+
+            result = inspect_website(url)
+
+            send_json(
+                self,
+                200,
+                result
+            )
+            return
+
+        # Get reports
         if path == "/reports":
-            conn = sqlite3.connect(DB_FILE)
-            conn.row_factory = sqlite3.Row
+
+            conn = get_db()
 
             rows = conn.execute("""
                 SELECT *
@@ -1047,10 +918,7 @@ class GigLennHandler(BaseHTTPRequestHandler):
 
             conn.close()
 
-            reports = [
-                dict(row)
-                for row in rows
-            ]
+            reports = [dict(row) for row in rows]
 
             send_json(
                 self,
@@ -1065,87 +933,64 @@ class GigLennHandler(BaseHTTPRequestHandler):
             self,
             404,
             {
-                "error": "Not found"
+                "error": "Endpoint not found."
             }
         )
 
-    # -------------------------
+    # --------------------------------------------------------
     # POST
-    # -------------------------
+    # --------------------------------------------------------
 
     def do_POST(self):
-        parsed = urlparse(self.path)
 
-        if parsed.path != "/reports":
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        if path != "/reports":
             send_json(
                 self,
                 404,
                 {
-                    "error": "Not found"
+                    "error": "Endpoint not found."
                 }
             )
             return
 
         data = read_json(self)
 
-        company = clean_text(
-            data.get("company", "")
-        )
+        title = clean_text(data.get("title", ""))
+        url = clean_text(data.get("url", ""))
+        description = clean_text(data.get("description", ""))
+        payment = clean_text(data.get("payment", ""))
+        reason = clean_text(data.get("reason", ""))
 
-        link = clean_text(
-            data.get("link", "")
-        )
+        conn = get_db()
 
-        source = clean_text(
-            data.get("source", "")
-        )
-
-        payment = clean_text(
-            data.get("payment", "")
-        )
-
-        amount = clean_text(
-            data.get("amount", "")
-        )
-
-        details = clean_text(
-            data.get("details", "")
-        )
-
-        email = clean_text(
-            data.get("email", "")
-        )
-
-        conn = sqlite3.connect(DB_FILE)
-
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            INSERT INTO reports
-            (
-                company,
-                link,
-                source,
+        cursor = conn.execute("""
+            INSERT INTO reports (
+                title,
+                url,
+                description,
                 payment,
-                amount,
-                details,
-                email,
-                status
+                reason,
+                status,
+                created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            company,
-            link,
-            source,
+            title,
+            url,
+            description,
             payment,
-            amount,
-            details,
-            email
+            reason,
+            "pending",
+            now_iso()
         ))
+
+        conn.commit()
 
         report_id = cursor.lastrowid
 
-        conn.commit()
         conn.close()
 
         send_json(
@@ -1153,64 +998,50 @@ class GigLennHandler(BaseHTTPRequestHandler):
             201,
             {
                 "success": True,
-                "id": report_id
+                "id": report_id,
+                "message": "Report submitted successfully."
             }
         )
 
-    # -------------------------
+    # --------------------------------------------------------
     # PATCH
-    # -------------------------
+    # --------------------------------------------------------
 
     def do_PATCH(self):
-        parsed = urlparse(self.path)
 
-        match = re.match(
-            r"^/reports/(\d+)$",
-            parsed.path
-        )
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        match = re.match(r"^/reports/(\d+)$", path)
 
         if not match:
             send_json(
                 self,
                 404,
                 {
-                    "error": "Not found"
+                    "error": "Report not found."
                 }
             )
             return
 
-        report_id = int(
-            match.group(1)
-        )
-
+        report_id = int(match.group(1))
         data = read_json(self)
 
-        status = clean_text(
-            data.get("status", "")
-        )
+        status = clean_text(data.get("status", ""))
 
-        allowed_statuses = {
-            "pending",
-            "reviewing",
-            "verified",
-            "rejected"
-        }
-
-        if status not in allowed_statuses:
+        if status not in ("pending", "reviewed", "resolved", "rejected"):
             send_json(
                 self,
                 400,
                 {
-                    "error": "Invalid status"
+                    "error": "Invalid status."
                 }
             )
             return
 
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db()
 
-        cursor = conn.cursor()
-
-        cursor.execute("""
+        cursor = conn.execute("""
             UPDATE reports
             SET status = ?
             WHERE id = ?
@@ -1219,9 +1050,10 @@ class GigLennHandler(BaseHTTPRequestHandler):
             report_id
         ))
 
+        conn.commit()
+
         updated = cursor.rowcount
 
-        conn.commit()
         conn.close()
 
         if not updated:
@@ -1229,7 +1061,7 @@ class GigLennHandler(BaseHTTPRequestHandler):
                 self,
                 404,
                 {
-                    "error": "Report not found"
+                    "error": "Report not found."
                 }
             )
             return
@@ -1238,23 +1070,26 @@ class GigLennHandler(BaseHTTPRequestHandler):
             self,
             200,
             {
-                "success": True
+                "success": True,
+                "message": "Report updated successfully."
             }
         )
 
-    # -------------------------
+    # --------------------------------------------------------
     # DELETE
-    # -------------------------
+    # --------------------------------------------------------
 
     def do_DELETE(self):
-        parsed = urlparse(self.path)
 
-        if parsed.path == "/reports":
-            conn = sqlite3.connect(DB_FILE)
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
 
-            conn.execute(
-                "DELETE FROM reports"
-            )
+        # Delete all reports
+        if path == "/reports":
+
+            conn = get_db()
+
+            conn.execute("DELETE FROM reports")
 
             conn.commit()
             conn.close()
@@ -1263,33 +1098,30 @@ class GigLennHandler(BaseHTTPRequestHandler):
                 self,
                 200,
                 {
-                    "success": True
+                    "success": True,
+                    "message": "All reports deleted."
                 }
             )
             return
 
-        match = re.match(
-            r"^/reports/(\d+)$",
-            parsed.path
-        )
+        # Delete one report
+        match = re.match(r"^/reports/(\d+)$", path)
 
         if match:
-            report_id = int(
-                match.group(1)
-            )
 
-            conn = sqlite3.connect(DB_FILE)
+            report_id = int(match.group(1))
 
-            cursor = conn.cursor()
+            conn = get_db()
 
-            cursor.execute(
+            cursor = conn.execute(
                 "DELETE FROM reports WHERE id = ?",
                 (report_id,)
             )
 
+            conn.commit()
+
             deleted = cursor.rowcount
 
-            conn.commit()
             conn.close()
 
             if not deleted:
@@ -1297,7 +1129,7 @@ class GigLennHandler(BaseHTTPRequestHandler):
                     self,
                     404,
                     {
-                        "error": "Report not found"
+                        "error": "Report not found."
                     }
                 )
                 return
@@ -1306,7 +1138,8 @@ class GigLennHandler(BaseHTTPRequestHandler):
                 self,
                 200,
                 {
-                    "success": True
+                    "success": True,
+                    "message": "Report deleted."
                 }
             )
             return
@@ -1315,36 +1148,38 @@ class GigLennHandler(BaseHTTPRequestHandler):
             self,
             404,
             {
-                "error": "Not found"
+                "error": "Endpoint not found."
             }
         )
 
 
-# -----------------------------
+# ============================================================
 # START SERVER
-# -----------------------------
+# ============================================================
 
 if __name__ == "__main__":
-    init_db()
 
-    print()
-    print("GigLenn Backend v7.0")
-    print("Status: ONLINE")
-    print("Database: SQLite")
-    print("Smart Analysis: ENABLED")
-    print("Risk Intelligence: ENABLED")
-    print("Website Inspection: ENABLED")
-    print("Server: http://localhost:3000")
-    print()
+    init_db()
 
     server = HTTPServer(
         (HOST, PORT),
         GigLennHandler
     )
 
+    print("==========================================")
+    print("GigLenn Backend v7.0")
+    print("==========================================")
+    print(f"Server: http://0.0.0.0:{PORT}")
+    print(f"Database: {DB_FILE}")
+    print("Status: ONLINE")
+    print("==========================================")
+
     try:
         server.serve_forever()
+
     except KeyboardInterrupt:
-        print()
-        print("GigLenn backend stopped.")
+        print("\nGigLenn backend stopped.")
+
+    finally:
         server.server_close()
+```
