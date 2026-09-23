@@ -1,8 +1,7 @@
-const BACKEND_URL = "http://localhost:3000";
+const BACKEND_URL = "https://gig-lenn.onrender.com";
 
 document.addEventListener("DOMContentLoaded", () => {
     const checkerForm = document.getElementById("checker-form");
-    const resultBox = document.getElementById("result-box");
 
     if (checkerForm) {
         checkerForm.addEventListener("submit", async function (event) {
@@ -19,7 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     level: "CAUTION",
                     score: 0,
                     message: "Please enter a job link or opportunity details.",
-                    explanation: "GigScan needs information about the opportunity before it can check for warning signs.",
+                    explanation: "GigLenn needs information about the opportunity before it can check for warning signs.",
                     action: "Enter the job description, message, or website link and scan again.",
                     signals: []
                 });
@@ -73,9 +72,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 showResult({
                     level: "CAUTION",
                     score: 0,
-                    message: "GigScan could not complete the scan.",
-                    explanation: "The GigScan backend may not be running or the connection could not be completed.",
-                    action: "Make sure the second Command Prompt window is running python server.py, then try again.",
+                    message: "GigLenn could not complete the scan.",
+                    explanation: "The GigLenn backend could not complete the requested check.",
+                    action: "Please check your internet connection and try the scan again.",
                     signals: []
                 });
             }
@@ -98,8 +97,9 @@ function showLoading() {
             <div class="result-label">SCANNING...</div>
             <div class="result-score">...</div>
         </div>
+
         <p class="result-message">
-            GigScan is checking this opportunity for warning signs.
+            GigLenn is checking this opportunity for warning signs.
         </p>
     `;
 
@@ -121,7 +121,7 @@ function showResult(data) {
     const message =
         data.risk?.message ||
         data.message ||
-        "GigScan has completed the scan.";
+        "GigLenn has completed the scan.";
 
     const explanation =
         data.risk?.explanation ||
@@ -180,8 +180,13 @@ function showResult(data) {
                         .map(signal => `
                             <div class="signal-card">
                                 <div class="signal-card-title">
-                                    ${escapeHTML(signal.title || signal.type || "Warning sign")}
+                                    ${escapeHTML(
+                                        signal.title ||
+                                        signal.type ||
+                                        "Warning sign"
+                                    )}
                                 </div>
+
                                 <div class="signal-card-detail">
                                     ${escapeHTML(signal.detail || "")}
                                 </div>
@@ -196,6 +201,7 @@ function showResult(data) {
                         <div class="signal-card-title">
                             No specific warning signs detected
                         </div>
+
                         <div class="signal-card-detail">
                             This does not guarantee that the opportunity is legitimate. Continue to verify the employer independently.
                         </div>
@@ -213,8 +219,11 @@ function showResult(data) {
 
 
 function combineResults(first, second) {
-    const firstScore = Number(first.analysis?.score ?? first.score ?? 0);
-    const secondScore = Number(second.analysis?.score ?? second.score ?? 0);
+    const firstScore =
+        Number(first.analysis?.score ?? first.score ?? 0);
+
+    const secondScore =
+        Number(second.analysis?.score ?? second.score ?? 0);
 
     const signals = [
         ...(first.analysis?.signals || first.signals || []),
@@ -225,7 +234,10 @@ function combineResults(first, second) {
     const seen = new Set();
 
     signals.forEach(signal => {
-        const key = signal.title || signal.type || signal.detail;
+        const key =
+            signal.title ||
+            signal.type ||
+            signal.detail;
 
         if (!seen.has(key)) {
             seen.add(key);
@@ -233,7 +245,8 @@ function combineResults(first, second) {
         }
     });
 
-    const score = Math.min(100, Math.max(firstScore, secondScore));
+    const score =
+        Math.min(100, Math.max(firstScore, secondScore));
 
     let level = "NO OBVIOUS WARNING SIGNS";
 
@@ -246,16 +259,17 @@ function combineResults(first, second) {
     return {
         level,
         score,
+
         message:
             level === "HIGH RISK"
                 ? "This opportunity contains several warning signs that deserve serious caution."
                 : level === "CAUTION"
                     ? "This opportunity contains some warning signs that should be checked carefully."
-                    : "GigScan did not find major warning patterns in the information provided.",
+                    : "GigLenn did not find major warning patterns in the information provided.",
 
         explanation:
             uniqueSignals.length
-                ? `GigScan identified ${uniqueSignals.length} warning pattern${uniqueSignals.length === 1 ? "" : "s"}.`
+                ? `GigLenn identified ${uniqueSignals.length} warning pattern${uniqueSignals.length === 1 ? "" : "s"}.`
                 : "No major warning patterns were detected.",
 
         action:
@@ -279,32 +293,35 @@ function setupReportForm() {
         event.preventDefault();
 
         const data = {
-            company: getValue("report-company"),
-            link: getValue("report-link"),
-            source: getValue("report-source"),
+            title: getValue("report-company"),
+            url: getValue("report-link"),
+            description: getValue("report-details"),
             payment: getValue("report-payment"),
-            amount: getValue("report-amount"),
-            details: getValue("report-details"),
-            email: getValue("report-email")
+            reason: getValue("report-source")
         };
 
         try {
-            const response = await fetch(`${BACKEND_URL}/reports`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(data)
-            });
+            const response = await fetch(
+                `${BACKEND_URL}/reports`,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(data)
+                }
+            );
 
             if (!response.ok) {
                 throw new Error("Report submission failed.");
             }
 
-            const success = document.getElementById("report-success");
+            const success =
+                document.getElementById("report-success");
 
             if (success) {
                 success.style.display = "block";
+
                 success.textContent =
                     "Thank you. Your report has been submitted for review.";
             }
@@ -315,7 +332,7 @@ function setupReportForm() {
             console.error(error);
 
             alert(
-                "The report could not be submitted. Please make sure the GigScan backend is running."
+                "The report could not be submitted. Please try again."
             );
         }
     });
@@ -325,7 +342,9 @@ function setupReportForm() {
 function getValue(id) {
     const element = document.getElementById(id);
 
-    return element ? element.value.trim() : "";
+    return element
+        ? element.value.trim()
+        : "";
 }
 
 
